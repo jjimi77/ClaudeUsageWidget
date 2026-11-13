@@ -20,7 +20,7 @@ Claude Pro/Max 구독의 **5시간 세션 한도**와 **주간 한도** 사용�
 ## 설치
 
 ```bash
-git clone <이 저장소 주소>
+git clone https://github.com/jjimi77/ClaudeUsageWidget.git
 cd ClaudeUsageWidget
 ./build.sh
 ```
