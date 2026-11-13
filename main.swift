@@ -1,6 +1,6 @@
 // Claude 구독 사용량 바탕화면 위젯
 // Claude Code CLI 로그인 토큰(키체인 "Claude Code-credentials")으로
-// 5시간 세션 한도 / 주간 한도 사용률을 1분마다 가져와 바탕화면에 표시합니다.
+// 5시간 세션 한도 / 주간 한도 사용률을 5분마다 가져와 바탕화면에 표시합니다.
 
 import AppKit
 import SwiftUI
@@ -8,12 +8,13 @@ import SwiftUI
 // MARK: - 자격 증명 (키체인)
 
 enum UsageError: LocalizedError {
-    case notLoggedIn, http(Int), badResponse
+    case notLoggedIn, http(Int), badResponse, rateLimited(TimeInterval?)
     var errorDescription: String? {
         switch self {
         case .notLoggedIn: return "Claude Code 로그인 필요\n터미널에서: claude auth login"
         case .http(let c): return "서버 오류 (HTTP \(c))"
         case .badResponse: return "응답 형식을 읽을 수 없음"
+        case .rateLimited: return "요청 제한 — 잠시 후 다시 시도"
         }
     }
 }
@@ -126,6 +127,11 @@ enum UsageAPI {
         let (data, resp) = try await URLSession.shared.data(for: req)
         let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
         if code == 401 { throw UsageError.notLoggedIn }
+        if code == 429 {
+            let ra = (resp as? HTTPURLResponse)?.value(forHTTPHeaderField: "retry-after")
+                .flatMap(Double.init)
+            throw UsageError.rateLimited(ra)
+        }
         guard code == 200 else { throw UsageError.http(code) }
         guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw UsageError.badResponse
@@ -187,27 +193,47 @@ final class UsageModel: ObservableObject {
     @Published var error: String?
     @Published var updated: Date?
     @Published var now = Date()
+    @Published var rateLimited = false
     private var timer: Timer?
     private var tick: Timer?
+    private var inFlight = false
+
+    // 기본 5분 간격. 요청 제한(429)이 오면 간격을 2배씩 늘림 (최대 30분)
+    static let baseInterval: TimeInterval = 300
+    static let maxInterval: TimeInterval = 1800
+    private var interval: TimeInterval = baseInterval
 
     func start() {
         refresh()
-        timer = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.refresh() }
-        }
         tick = Timer.scheduledTimer(withTimeInterval: 15, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.now = Date() }
         }
     }
 
+    private func schedule(after seconds: TimeInterval) {
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: seconds, repeats: false) { [weak self] _ in
+            Task { @MainActor in self?.refresh() }
+        }
+    }
+
     func refresh() {
+        guard !inFlight else { return }
+        inFlight = true
         Task {
+            defer { inFlight = false }
             do {
                 let r = try await UsageAPI.fetch()
-                items = r; error = nil; updated = Date()
+                items = r; error = nil; rateLimited = false; updated = Date()
+                interval = Self.baseInterval
+            } catch UsageError.rateLimited(let retryAfter) {
+                rateLimited = true
+                error = UsageError.rateLimited(retryAfter).errorDescription
+                interval = min(Self.maxInterval, max(interval * 2, retryAfter ?? 0))
             } catch {
                 self.error = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             }
+            schedule(after: interval)
         }
     }
 }
@@ -323,8 +349,11 @@ struct WidgetView: View {
                         ForEach(weekly) { LimitRing(item: $0, now: model.now) }
                     }
                 }
-                if model.error != nil {
-                    Text("⚠︎ 최근 갱신 실패").font(.system(size: 10)).foregroundStyle(.orange)
+                if model.rateLimited {
+                    Text("요청 제한으로 갱신 지연 중").font(.system(size: 10)).foregroundStyle(.tertiary)
+                } else if let e = model.error {
+                    Text("⚠︎ 최근 갱신 실패: \(e)").font(.system(size: 10)).foregroundStyle(.orange)
+                        .lineLimit(2)
                 }
             }
         }
