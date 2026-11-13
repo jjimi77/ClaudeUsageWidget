@@ -76,3 +76,7 @@ osascript -e 'tell application "System Events" to make login item at end with pr
 | 위젯에 "로그인 필요" | `claude auth login` |
 | 위젯이 안 보임 | `open ~/Applications/ClaudeUsage.app` 다시 실행, 모니터 구석 확인 |
 | 위치 초기화 | `defaults delete local.claude-usage-widget` 후 재실행 |
+
+## 라이선스
+
+[MIT](LICENSE)
